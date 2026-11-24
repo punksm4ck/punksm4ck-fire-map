@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8"/>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        .dark-tiles .leaflet-tile-pane { filter: invert(100%) hue-rotate(180deg) brightness(92%) contrast(92%); }
+        html, body, #map { height: 100%; width: 100%; margin: 0; background: #080c16; font-family: Menlo, Monaco, sans-serif; }
+        .popup-title { color: #ff6a00; font-weight: 700; font-size: 13px; border-bottom: 1px solid #2b3240; padding-bottom: 5px; margin-bottom: 6px; }
+        .popup-badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 9px; font-weight: 700; text-transform: uppercase; margin-bottom: 6px; }
+        .popup-note { color: #ffea00; font-size: 10px; margin-top: 6px; border-top: 1px solid #2b3240; padding-top: 5px; line-height: 1.35; }
+        .data-row { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; gap: 12px; }
+        .data-label { color: #8b949e; }
+        .data-val { color: #f0f6fc; font-weight: 600; text-align: right; }
+        .stat-cyan { color: #00e5ff; font-weight: 700; }
+        .stat-danger { color: #ff4d4d; font-weight: 700; }
+        .leaflet-popup-content-wrapper { background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.65); }
+        .leaflet-popup-tip { background: #0d1117; }
+        .legend-card { position: absolute; bottom: 18px; left: 18px; z-index: 999; background: rgba(13, 17, 23, 0.92); border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; color: #c9d1d9; font-size: 11px; }
+        .legend-title { color: #00e5ff; font-weight: 700; font-size: 10px; letter-spacing: 1px; margin-bottom: 6px; text-transform: uppercase; }
+        .legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+        .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid #000; }
+        .counter-pill { position: absolute; top: 14px; left: 18px; z-index: 999; background: rgba(13, 17, 23, 0.92); border: 1px solid #ff6a00; border-radius: 20px; padding: 5px 12px; color: #ffffff; font-size: 11px; font-weight: 700; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div class="counter-pill" id="nodeCounter">VISIBLE INCIDENTS: 0</div>
+    <div class="legend-card">
+        <div class="legend-title">2026 Fire Intel Layers</div>
+        <div class="legend-item"><span class="dot" style="background:#ff6a00;"></span> Warehouse / Logistics</div>
+        <div class="legend-item"><span class="dot" style="background:#ff2e93;"></span> Arson / Suspicious</div>
+        <div class="legend-item"><span class="dot" style="background:#00e5ff;"></span> Hazmat / Chemical Plant</div>
+        <div class="legend-item"><span class="dot" style="background:#b366ff;"></span> CSB Federal Investigation</div>
+        <div class="legend-item"><span class="dot" style="background:#ffea00;"></span> Factory / Cold Storage / Recycling</div>
+    </div>
+
+    <script>
+        var map, markers, radii, darkLayer, satLayer;
+        var markerIndex = {};
+        var _allData = [];
+        var _filterState = {
+            query: "",
+            state: "ALL",
+            categories: { Warehouse: true, Arson: true, Hazmat: true, CSB: true, Industrial: true },
+            showRings: false
+        };
+
+        var CAT_COLORS = {
+            Warehouse: "#ff6a00",
+            Arson: "#ff2e93",
+            Hazmat: "#00e5ff",
+            CSB: "#b366ff",
+            Industrial: "#ffea00"
+        };
+
+        function initMap() {
+            if (typeof L === "undefined") {
+                setTimeout(initMap, 200);
+                return;
+            }
+            map = L.map("map", { zoomControl: false }).setView([38.5, -96.5], 4);
+            L.control.zoom({ position: "topright" }).addTo(map);
+
+            darkLayer = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+                attribution: "&copy; OpenStreetMap contributors"
+            }).addTo(map);
+
+            satLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+                attribution: "Esri World Imagery"
+            });
+
+            document.getElementById("map").classList.add("dark-tiles");
+            markers = L.layerGroup().addTo(map);
+            radii = L.layerGroup().addTo(map);
+        }
+        initMap();
+
+        window.setBasemap = function(mode) {
+            if (!map) return;
+            if (mode === "satellite") {
+                document.getElementById("map").classList.remove("dark-tiles");
+                if (map.hasLayer(darkLayer)) map.removeLayer(darkLayer);
+                if (!map.hasLayer(satLayer)) satLayer.addTo(map);
+            } else {
+                document.getElementById("map").classList.add("dark-tiles");
+                if (map.hasLayer(satLayer)) map.removeLayer(satLayer);
+                if (!map.hasLayer(darkLayer)) darkLayer.addTo(map);
+            }
+        };
+
+        window.loadIncidents = function(data) {
+            _allData = data || [];
+            window.refreshMap();
+        };
+
+        window.applyFilters = function(query, stateCode, categoriesObj, showRings) {
+            _filterState.query = (query || "").toLowerCase();
+            _filterState.state = stateCode || "ALL";
+            _filterState.categories = categoriesObj || _filterState.categories;
+            _filterState.showRings = !!showRings;
+            window.refreshMap();
+        };
+
+        window.flyToIncident = function(id) {
+            var m = markerIndex[id];
+            if (m && map) {
+                map.flyTo(m.getLatLng(), 11, { duration: 1.1 });
+                setTimeout(function() { m.openPopup(); }, 600);
+            }
+        };
+
+        window.refreshMap = function() {
+            if (!markers) {
+                setTimeout(window.refreshMap, 250);
+                return;
+            }
+            markers.clearLayers();
+            radii.clearLayers();
+            markerIndex = {};
+            var visible = 0;
+
+            _allData.forEach(function(f) {
+                if (!_filterState.categories[f.category]) return;
+                if (_filterState.state !== "ALL" && f.state !== _filterState.state) return;
+
+                if (_filterState.query) {
+                    var hay = (f.name + " " + f.city + " " + f.state + " " + f.category + " " + f.source + " " + f.note).toLowerCase();
+                    if (hay.indexOf(_filterState.query) === -1) return;
+                }
+
+                visible++;
+                var color = CAT_COLORS[f.category] || "#ff6a00";
+                var radius = f.category === "Arson" || f.category === "Hazmat" ? 9 : 8;
+
+                var m = L.circleMarker([f.lat, f.lng], {
+                    radius: radius,
+                    fillColor: color,
+                    color: "#000000",
+                    weight: 1.5,
+                    fillOpacity: 0.92
+                });
+
+                var popup = `<div class="popup-title">${f.name}</div>`;
+                popup += `<div class="popup-badge" style="background:${color};color:#000;">${f.category} &bull; ${f.date}</div>`;
+                popup += `<div class="data-row"><span class="data-label">Location:</span><span class="data-val">${f.city}, ${f.state}</span></div>`;
+                popup += `<div class="data-row"><span class="data-label">Source:</span><span class="data-val">${f.source}</span></div>`;
+                popup += `<div class="data-row"><span class="data-label">Distance (Your location):</span><span class="stat-cyan">${f.distance_mi} mi</span></div>`;
+                if (f.damage && f.damage !== "TBD") {
+                    popup += `<div class="data-row"><span class="data-label">Est. Impact:</span><span class="stat-danger">${f.damage}</span></div>`;
+                }
+                if (f.note) {
+                    popup += `<div class="popup-note">${f.note}</div>`;
+                }
+
+                m.bindPopup(popup, { maxWidth: 320 });
+                markers.addLayer(m);
+                markerIndex[f.id] = m;
+
+                if (_filterState.showRings) {
+                    L.circle([f.lat, f.lng], {
+                        radius: 8046.7,
+                        color: color,
+                        weight: 1,
+                        fillOpacity: 0.08,
+                        dashArray: "5, 8"
+                    }).addTo(radii);
+                }
+            });
+
+            var counter = document.getElementById("nodeCounter");
+            if (counter) counter.textContent = "VISIBLE INCIDENTS: " + visible.toLocaleString();
+        };
+    </script>
+</body>
+</html>
